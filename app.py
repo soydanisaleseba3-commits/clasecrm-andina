@@ -1,711 +1,469 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
 import io
-from datetime import datetime
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
-# ============================================================
-# CONFIGURACIÓN
-# ============================================================
-
+# ==============================================================================
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTÉTICA CRM ENTERPRISE
+# ==============================================================================
 st.set_page_config(
-    page_title="ANDINA CRM · RFM",
-    page_icon="📊",
+    page_title="ANDINA | Customer Intelligence & RFM Engine",
+    page_icon="🎯",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
-
-# ============================================================
-# ESTILOS
-# ============================================================
-
-st.markdown("""
-<style>
-
-.main {
-    background-color: #f7f8fa;
-}
-
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 3rem;
-}
-
-h1, h2, h3 {
-    font-weight: 700;
-}
-
-.metric-card {
-    background: white;
-    padding: 20px;
-    border-radius: 14px;
-    border: 1px solid #e8e8e8;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-}
-
-.segment-card {
-    background: white;
-    padding: 18px;
-    border-radius: 14px;
-    border: 1px solid #e8e8e8;
-    margin-bottom: 10px;
-}
-
-.small-text {
-    color: #6b7280;
-    font-size: 0.85rem;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-
-# ============================================================
-# VARIABLES
-# ============================================================
-
-REQUIRED_COLUMNS = [
-    "ClienteID",
-    "Nombre",
-    "Tipo",
-    "Ciudad",
-    "UltimaCompra",
-    "Compras",
-    "ValorTotal",
-    "Categoria",
-    "Canal"
-]
-
-
-# ============================================================
-# FUNCIONES
-# ============================================================
-
-def validate_columns(df):
-
-    missing = [
-        col for col in REQUIRED_COLUMNS
-        if col not in df.columns
-    ]
-
-    return missing
-
-
-def calculate_rfm(df):
-
-    data = df.copy()
-
-    # Fecha
-    data["UltimaCompra"] = pd.to_datetime(
-        data["UltimaCompra"],
-        errors="coerce"
-    )
-
-    # Numéricos
-    data["Compras"] = pd.to_numeric(
-        data["Compras"],
-        errors="coerce"
-    ).fillna(0)
-
-    data["ValorTotal"] = pd.to_numeric(
-        data["ValorTotal"],
-        errors="coerce"
-    ).fillna(0)
-
-    # Fecha de referencia
-    fecha_referencia = data["UltimaCompra"].max()
-
-    # Recency
-    data["Recency"] = (
-        fecha_referencia - data["UltimaCompra"]
-    ).dt.days
-
-    data["Recency"] = data["Recency"].fillna(
-        data["Recency"].max()
-    )
-
-    # Frequency
-    data["Frequency"] = data["Compras"]
-
-    # Monetary
-    data["Monetary"] = data["ValorTotal"]
-
-    # ========================================================
-    # SCORING
-    # ========================================================
-
-    # Recency:
-    # menor cantidad de días = mejor score
-    data["R_Score"] = pd.qcut(
-        data["Recency"].rank(method="first"),
-        5,
-        labels=[5, 4, 3, 2, 1]
-    ).astype(int)
-
-    # Frequency
-    data["F_Score"] = pd.qcut(
-        data["Frequency"].rank(method="first"),
-        5,
-        labels=[1, 2, 3, 4, 5]
-    ).astype(int)
-
-    # Monetary
-    data["M_Score"] = pd.qcut(
-        data["Monetary"].rank(method="first"),
-        5,
-        labels=[1, 2, 3, 4, 5]
-    ).astype(int)
-
-    # Código RFM
-    data["RFM_Score"] = (
-        data["R_Score"].astype(str)
-        + data["F_Score"].astype(str)
-        + data["M_Score"].astype(str)
-    )
-
-    # Score promedio
-    data["RFM_Total"] = (
-        data["R_Score"]
-        + data["F_Score"]
-        + data["M_Score"]
-    )
-
-    # Segmentación
-    data["Segmento"] = data.apply(
-        classify_segment,
-        axis=1
-    )
-
-    return data, fecha_referencia
-
-
-def classify_segment(row):
-
-    r = row["R_Score"]
-    f = row["F_Score"]
-    m = row["M_Score"]
-
-    # Campeones
-    if r >= 4 and f >= 4 and m >= 4:
-        return "Campeones"
-
-    # Clientes leales
-    if r >= 4 and f >= 4:
-        return "Clientes Leales"
-
-    # Alto valor / riesgo
-    if r <= 2 and f >= 4 and m >= 4:
-        return "No Podemos Perderlos"
-
-    # En riesgo
-    if r <= 2 and f >= 3:
-        return "En Riesgo"
-
-    # Potenciales
-    if r >= 4 and f <= 3 and m >= 3:
-        return "Potenciales"
-
-    # Nuevos
-    if r >= 4 and f <= 2:
-        return "Nuevos Clientes"
-
-    # Hibernando
-    if r <= 2 and f <= 2 and m >= 3:
-        return "Hibernando"
-
-    # Perdidos
-    if r <= 2 and f <= 2:
-        return "Perdidos"
-
-    return "Necesitan Atención"
-
-
-def export_excel(df):
-
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl"
-    ) as writer:
-
-        df.to_excel(
-            writer,
-            index=False,
-            sheet_name="Clientes"
-        )
-
-    return output.getvalue()
-
-
-def export_all_segments(df):
-
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl"
-    ) as writer:
-
-        for segmento in sorted(
-            df["Segmento"].unique()
-        ):
-
-            segment_df = df[
-                df["Segmento"] == segmento
-            ]
-
-            sheet_name = segmento[:31]
-
-            segment_df.to_excel(
-                writer,
-                index=False,
-                sheet_name=sheet_name
-            )
-
-    return output.getvalue()
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.title("ANDINA CRM · Segmentación RFM")
 
 st.markdown(
-    "Clasificación inteligente de clientes para marketing y CRM."
+    """
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    
+    /* Tarjetas de métricas */
+    .metric-container {
+        background: #FFFFFF;
+        border: 1px solid #E2E8F0;
+        border-radius: 10px;
+        padding: 18px 20px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        margin-bottom: 12px;
+    }
+    .metric-label { font-size: 0.82rem; font-weight: 600; color: #64748B; text-transform: uppercase; letter-spacing: 0.05em; }
+    .metric-val { font-size: 1.65rem; font-weight: 700; color: #0F172A; margin: 4px 0; }
+    .metric-sub { font-size: 0.78rem; color: #10B981; font-weight: 500; }
+    
+    /* Playbook Card */
+    .playbook-card {
+        background: #F8FAFC;
+        border-left: 4px solid #3B82F6;
+        border-radius: 0 8px 8px 0;
+        padding: 14px 18px;
+        margin: 10px 0;
+    }
+    .channel-badge {
+        display: inline-block;
+        background: #EEF2FF;
+        color: #4F46E5;
+        border: 1px solid #C7D2FE;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        margin-right: 6px;
+        margin-top: 4px;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
-st.divider()
+# ==============================================================================
+# 2. FRAMEWORK RFM & PLAYBOOKS DE MARKETING DIGITAL
+# ==============================================================================
+PLAYBOOKS = {
+    "Campeones": {
+        "color": "#10B981",
+        "desc": "Compraron recientemente, compran seguido y generan el mayor volumen de facturación.",
+        "canales": [
+            "WhatsApp VIP / Key Account",
+            "Email 1-a-1",
+            "Pauta Lookalike (1%)",
+        ],
+        "accion": "Venta cruzada de contratos anuales de consultoría y mantenimiento preventivo. Early access a nuevos equipos.",
+    },
+    "Clientes Leales": {
+        "color": "#3B82F6",
+        "desc": "Compradores constantes con alto valor acumulado. Receptivos a la marca.",
+        "canales": [
+            "Email Marketing Segmentado",
+            "WhatsApp Automatizado",
+            "Pauta Retargeting",
+        ],
+        "accion": "Suscripción recurrente a consumibles con beneficios exclusivos y programas de referidos B2B.",
+    },
+    "Prometedores": {
+        "color": "#8B5CF6",
+        "desc": "Clientes recientes con buena respuesta pero bajo número de compras históricas.",
+        "canales": [
+            "Email Secuencia Nurturing",
+            "WhatsApp Onboarding",
+            "Pauta Conversión",
+        ],
+        "accion": "Garantizar adopción del equipo adquirido, ofrecer paquete de consumibles de bienvenida con descuento temporal.",
+    },
+    "Necesitan Atención": {
+        "color": "#F59E0B",
+        "desc": "Frecuencia y valor promedio, pero su recencia empieza a enfriarse.",
+        "canales": [
+            "Email Reactivación",
+            "SMS Recordatorio",
+            "Pauta Remarketing Dinámico",
+        ],
+        "accion": "Ofrecer chequeo de diagnóstico gratuito para equipos o recordatorio de reposición de insumos críticos.",
+    },
+    "En Riesgo": {
+        "color": "#EF4444",
+        "desc": "Eran grandes compradores o cuentas clave, pero no han interactuado recientemente.",
+        "canales": [
+            "Llamada Ejecutiva + WhatsApp Directo",
+            "Email Especial de Retención",
+        ],
+        "accion": "Contacto personalizado de Gerencia de Servicio / Ventas con ofertas agresivas de renovación y soporte.",
+    },
+    "Dormidos / Perdidos": {
+        "color": "#64748B",
+        "desc": "Bajo ticket, baja frecuencia y sin actividad comercial en largo tiempo.",
+        "canales": [
+            "Email Win-Back Automatizado",
+            "SMS Promocional Flash",
+            "Exclusión de Pauta",
+        ],
+        "accion": "Depuración del CRM para no quemar entregabilidad o 1 campaña final con descuento de liquidación.",
+    },
+}
 
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+# ==============================================================================
+# 3. MOTOR DE CÁLCULO RFM ROBUSTO
+# ==============================================================================
+def process_rfm(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip()
 
+    # Tipado y limpieza
+    df["UltimaCompra"] = pd.to_datetime(df["UltimaCompra"], errors="coerce")
+    df["Compras"] = pd.to_numeric(df["Compras"], errors="coerce").fillna(0)
+    df["ValorTotal"] = (
+        pd.to_numeric(df["ValorTotal"], errors="coerce").fillna(0)
+    )
+
+    # Recencia en días
+    hoy = pd.Timestamp.now().normalize()
+    df["Recencia_Dias"] = (
+        (hoy - df["UltimaCompra"]).dt.days.fillna(9999).astype(int)
+    )
+
+    # Quintiles estadísticos usando ranking para manejar fronteras idénticas sin empates
+    df["R_Score"] = pd.qcut(
+        df["Recencia_Dias"].rank(method="first", ascending=True),
+        5,
+        labels=[5, 4, 3, 2, 1],
+    ).astype(int)
+    df["F_Score"] = pd.qcut(
+        df["Compras"].rank(method="first", ascending=True),
+        5,
+        labels=[1, 2, 3, 4, 5],
+    ).astype(int)
+    df["M_Score"] = pd.qcut(
+        df["ValorTotal"].rank(method="first", ascending=True),
+        5,
+        labels=[1, 2, 3, 4, 5],
+    ).astype(int)
+
+    df["RFM_Cell"] = (
+        df["R_Score"].astype(str)
+        + df["F_Score"].astype(str)
+        + df["M_Score"].astype(str)
+    )
+    df["FM_Score"] = ((df["F_Score"] + df["M_Score"]) / 2.0).round(2)
+
+    # Matriz Moderna de Segmentación (R vs FM)
+    def assign_segment(row):
+        r = row["R_Score"]
+        fm = row["FM_Score"]
+        if r >= 4 and fm >= 4:
+            return "Campeones"
+        elif r >= 3 and fm >= 3:
+            return "Clientes Leales"
+        elif r >= 4 and fm < 3:
+            return "Prometedores"
+        elif r in [2, 3] and (2.0 <= fm < 3.5):
+            return "Necesitan Atención"
+        elif r <= 2 and fm >= 3.0:
+            return "En Riesgo"
+        else:
+            return "Dormidos / Perdidos"
+
+    df["Segmento"] = df.apply(assign_segment, axis=1)
+    return df
+
+
+def to_excel_download(df_to_export: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_to_export.to_excel(writer, index=False, sheet_name="Segmento_RFM")
+    return output.getvalue()
+
+
+# ==============================================================================
+# 4. SIDEBAR - INGESTA DE DATOS Y FILTROS
+# ==============================================================================
 with st.sidebar:
-
-    st.header("📁 Cargar clientes")
-
-    uploaded_file = st.file_uploader(
-        "Sube tu archivo CSV",
-        type=["csv"]
+    st.image(
+        "https://cdn-icons-png.flaticon.com/512/9167/9167015.png", width=48
     )
-
-    st.caption(
-        "Columnas requeridas: ClienteID, Nombre, Tipo, "
-        "Ciudad, UltimaCompra, Compras, ValorTotal, "
-        "Categoria y Canal."
-    )
-
-
-# ============================================================
-# CARGA DE DATOS
-# ============================================================
-
-if uploaded_file is None:
-
-    st.info(
-        "👆 Sube un CSV para comenzar el análisis RFM."
-    )
-
-    st.markdown("""
-    ### ¿Qué analiza este CRM?
-
-    **R — Recency**  
-    ¿Hace cuánto compró?
-
-    **F — Frequency**  
-    ¿Cuántas veces compra?
-
-    **M — Monetary**  
-    ¿Cuánto dinero representa?
-
-    El sistema convierte estas variables en una
-    segmentación accionable para marketing.
-    """)
-
-    st.stop()
-
-
-# ============================================================
-# LECTURA
-# ============================================================
-
-try:
-
-    df = pd.read_csv(uploaded_file)
-
-except Exception:
-
-    st.error(
-        "No fue posible leer el CSV. "
-        "Verifica que el archivo tenga formato CSV válido."
-    )
-
-    st.stop()
-
-
-# ============================================================
-# VALIDACIÓN
-# ============================================================
-
-missing_columns = validate_columns(df)
-
-if missing_columns:
-
-    st.error(
-        "El archivo no contiene todas las columnas requeridas."
-    )
-
-    st.write(
-        "Columnas faltantes:",
-        missing_columns
-    )
-
-    st.stop()
-
-
-# ============================================================
-# RFM
-# ============================================================
-
-rfm, reference_date = calculate_rfm(df)
-
-
-# ============================================================
-# FILTROS
-# ============================================================
-
-st.sidebar.divider()
-
-st.sidebar.header("🎯 Filtros")
-
-selected_city = st.sidebar.multiselect(
-    "Ciudad",
-    sorted(rfm["Ciudad"].dropna().unique())
-)
-
-selected_type = st.sidebar.multiselect(
-    "Tipo de cliente",
-    sorted(rfm["Tipo"].dropna().unique())
-)
-
-selected_category = st.sidebar.multiselect(
-    "Categoría",
-    sorted(rfm["Categoria"].dropna().unique())
-)
-
-selected_channel = st.sidebar.multiselect(
-    "Canal",
-    sorted(rfm["Canal"].dropna().unique())
-)
-
-selected_segment = st.sidebar.multiselect(
-    "Segmento RFM",
-    sorted(rfm["Segmento"].unique())
-)
-
-
-filtered = rfm.copy()
-
-if selected_city:
-    filtered = filtered[
-        filtered["Ciudad"].isin(selected_city)
-    ]
-
-if selected_type:
-    filtered = filtered[
-        filtered["Tipo"].isin(selected_type)
-    ]
-
-if selected_category:
-    filtered = filtered[
-        filtered["Categoria"].isin(selected_category)
-    ]
-
-if selected_channel:
-    filtered = filtered[
-        filtered["Canal"].isin(selected_channel)
-    ]
-
-if selected_segment:
-    filtered = filtered[
-        filtered["Segmento"].isin(selected_segment)
-    ]
-
-
-# ============================================================
-# KPIs
-# ============================================================
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    st.metric(
-        "Clientes",
-        f"{len(filtered):,}"
-    )
-
-with col2:
-    st.metric(
-        "Valor total",
-        f"${filtered['Monetary'].sum():,.0f}"
-    )
-
-with col3:
-    st.metric(
-        "Compras",
-        f"{filtered['Frequency'].sum():,.0f}"
-    )
-
-with col4:
-
-    avg_ticket = (
-        filtered["Monetary"].sum()
-        / filtered["Frequency"].sum()
-        if filtered["Frequency"].sum() > 0
-        else 0
-    )
-
-    st.metric(
-        "Ticket promedio",
-        f"${avg_ticket:,.0f}"
-    )
-
-with col5:
-
-    avg_recency = (
-        filtered["Recency"].mean()
-        if len(filtered) > 0
-        else 0
-    )
-
-    st.metric(
-        "Recencia promedio",
-        f"{avg_recency:.0f} días"
-    )
-
-
-st.divider()
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Dashboard",
-    "👥 Segmentación",
-    "🔎 Clientes",
-    "📥 Exportar"
-])
-
-
-# ============================================================
-# TAB 1
-# ============================================================
-
-with tab1:
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.subheader("Clientes por segmento")
-
-        segment_counts = (
-            filtered["Segmento"]
-            .value_counts()
-        )
-
-        st.bar_chart(
-            segment_counts
-        )
-
-    with col2:
-
-        st.subheader("Valor por segmento")
-
-        segment_value = (
-            filtered
-            .groupby("Segmento")["Monetary"]
-            .sum()
-            .sort_values(ascending=False)
-        )
-
-        st.bar_chart(
-            segment_value
-        )
-
-
-    st.subheader("Distribución por ciudad")
-
-    city_data = (
-        filtered
-        .groupby("Ciudad")
-        .agg(
-            Clientes=("ClienteID", "count"),
-            Valor=("Monetary", "sum")
-        )
-        .sort_values(
-            "Valor",
-            ascending=False
-        )
-    )
-
-    st.dataframe(
-        city_data,
-        use_container_width=True
-    )
-
-
-# ============================================================
-# TAB 2
-# ============================================================
-
-with tab2:
-
-    st.subheader("Segmentación RFM")
-
-    segment_summary = (
-        filtered
-        .groupby("Segmento")
-        .agg(
-            Clientes=("ClienteID", "count"),
-            ValorTotal=("Monetary", "sum"),
-            Compras=("Frequency", "sum"),
-            RecenciaPromedio=("Recency", "mean")
-        )
-        .sort_values(
-            "ValorTotal",
-            ascending=False
-        )
-    )
-
-    segment_summary[
-        "Participación"
-    ] = (
-        segment_summary["Clientes"]
-        / len(filtered)
-        * 100
-    )
-
-    st.dataframe(
-        segment_summary.style.format({
-            "ValorTotal": "${:,.0f}",
-            "Compras": "{:,.0f}",
-            "RecenciaPromedio": "{:.0f}",
-            "Participación": "{:.1f}%"
-        }),
-        use_container_width=True
-    )
-
-
-# ============================================================
-# TAB 3
-# ============================================================
-
-with tab3:
-
-    st.subheader("Explorador de clientes")
-
-    columns_to_show = [
-        "ClienteID",
-        "Nombre",
-        "Tipo",
-        "Ciudad",
-        "UltimaCompra",
-        "Compras",
-        "ValorTotal",
-        "Categoria",
-        "Canal",
-        "Recency",
-        "Frequency",
-        "Monetary",
-        "R_Score",
-        "F_Score",
-        "M_Score",
-        "RFM_Score",
-        "Segmento"
-    ]
-
-    st.dataframe(
-        filtered[columns_to_show],
-        use_container_width=True,
-        height=600
-    )
-
-
-# ============================================================
-# TAB 4
-# ============================================================
-
-with tab4:
-
-    st.subheader("Descargar segmentos")
-
-    st.markdown(
-        "Selecciona un segmento para descargar "
-        "su base comercial."
-    )
-
-    available_segments = sorted(
-        filtered["Segmento"].unique()
-    )
-
-    selected_download_segment = st.selectbox(
-        "Segmento",
-        available_segments
-    )
-
-    segment_download = filtered[
-        filtered["Segmento"]
-        == selected_download_segment
-    ]
-
-    excel_segment = export_excel(
-        segment_download
-    )
-
-    st.download_button(
-        label=f"⬇️ Descargar {selected_download_segment}",
-        data=excel_segment,
-        file_name=(
-            f"ANDINA_{selected_download_segment}.xlsx"
-        ),
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        )
-    )
-
+    st.title("ANDINA CRM")
+    st.caption("Sistema de Segmentación RFM y Funnels")
     st.divider()
 
-    st.subheader("Descargar todos los segmentos")
-
-    excel_all = export_all_segments(
-        filtered
+    uploaded_file = st.file_uploader(
+        "Cargar Base de Clientes (.CSV)",
+        type=["csv"],
+        help="El archivo debe contener: ClienteID, Nombre, Tipo, Ciudad, UltimaCompra, Compras, ValorTotal, Categoria, Canal",
     )
 
-    st.download_button(
-        label="⬇️ Descargar todos los segmentos",
-        data=excel_all,
-        file_name="ANDINA_RFM_SEGMENTOS.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
+    url_default = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRyGkmN0BzJUz4ILVZvL3zeg6-PVXRbdwgV5epmI4QfhnrFj4HfzUgoEUV07ZanEgV-ArFCX18g312v/pub?output=csv"
+    use_cloud_data = st.checkbox("Cargar dataset en vivo de ANDINA", value=True)
+
+# Carga de Datos
+df_raw = None
+if uploaded_file is not None:
+    df_raw = pd.read_csv(uploaded_file)
+elif use_cloud_data:
+    try:
+        df_raw = pd.read_csv(url_default)
+    except Exception:
+        st.sidebar.error("Error al cargar la URL. Sube el archivo CSV manual.")
+
+# ==============================================================================
+# 5. DASHBOARD PRINCIPAL
+# ==============================================================================
+if df_raw is not None:
+    df = process_rfm(df_raw)
+
+    # Filtros de Operación en Sidebar
+    with st.sidebar:
+        st.subheader("🎯 Filtros Estratégicos")
+        ciudades_disp = ["Todas"] + sorted(
+            df["Ciudad"].dropna().unique().tolist()
         )
+        ciudad_sel = st.selectbox("Filtrar por Ciudad", ciudades_disp)
+
+        tipos_disp = ["Todos"] + sorted(df["Tipo"].dropna().unique().tolist())
+        tipo_sel = st.selectbox("Tipo de Cliente", tipos_disp)
+
+        if ciudad_sel != "Todas":
+            df = df[df["Ciudad"] == ciudad_sel]
+        if tipo_sel != "Todos":
+            df = df[df["Tipo"] == tipo_sel]
+
+    # Header
+    st.title("⚡ Segmentación de Clientes RFM & Activación")
+    st.markdown(
+        f"Base procesada: **{len(df):,} clientes** | Facturación acumulada: **${df['ValorTotal'].sum():,.0f}**"
     )
 
+    # KPIs de Alto Nivel
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    with kpi1:
+        st.markdown(
+            f"""
+        <div class="metric-container">
+            <div class="metric-label">Total Clientes</div>
+            <div class="metric-val">{len(df):,}</div>
+            <div class="metric-sub">Activos en Base</div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with kpi2:
+        st.markdown(
+            f"""
+        <div class="metric-container">
+            <div class="metric-label">Ticket Promedio (AOV)</div>
+            <div class="metric-val">${(df['ValorTotal'].sum() / max(df['Compras'].sum(), 1)):,.0f}</div>
+            <div class="metric-sub">Por Transacción</div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with kpi3:
+        st.markdown(
+            f"""
+        <div class="metric-container">
+            <div class="metric-label">Recencia Mediana</div>
+            <div class="metric-val">{int(df['Recencia_Dias'].median())} días</div>
+            <div class="metric-sub">Ventana de compra</div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with kpi4:
+        champs_rev = df[df["Segmento"] == "Campeones"]["ValorTotal"].sum()
+        pct_champs = (
+            (champs_rev / df["ValorTotal"].sum() * 100)
+            if df["ValorTotal"].sum() > 0
+            else 0
+        )
+        st.markdown(
+            f"""
+        <div class="metric-container">
+            <div class="metric-label">Ingresos Campeones</div>
+            <div class="metric-val">{pct_champs:.1f}%</div>
+            <div class="metric-sub">Concentración de Facturación</div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
 
-# ============================================================
-# FOOTER
-# ============================================================
+    # ==============================================================================
+    # 6. VISUALIZACIÓN ANALÍTICA TIPO CRM
+    # ==============================================================================
+    tab_overview, tab_matrix, tab_exports, tab_playbooks = st.tabs([
+        "📊 Distribución de Segmentos",
+        "🎯 Matriz 2D (R vs FM)",
+        "📥 Descargas Excel por Segmento",
+        "🚀 Playbooks de Campañas",
+    ])
 
-st.divider()
+    with tab_overview:
+        c_left, c_right = st.columns([1, 1])
 
-st.caption(
-    f"ANDINA CRM · Modelo RFM · Fecha de referencia: "
-    f"{reference_date.strftime('%Y-%m-%d')}"
-)
+        # Agrupación de métricas por segmento
+        seg_summary = (
+            df.groupby("Segmento")
+            .agg(
+                Clientes=("ClienteID", "count"),
+                Ingresos=("ValorTotal", "sum"),
+                ComprasPromedio=("Compras", "mean"),
+                RecenciaPromedio=("Recencia_Dias", "mean"),
+            )
+            .reset_index()
+        )
+
+        color_map = {k: v["color"] for k, v in PLAYBOOKS.items()}
+
+        with c_left:
+            fig_pie = px.pie(
+                seg_summary,
+                values="Clientes",
+                names="Segmento",
+                title="<b>Volumen de Clientes por Segmento</b>",
+                color="Segmento",
+                color_discrete_map=color_map,
+                hole=0.45,
+            )
+            fig_pie.update_traces(
+                textposition="inside", textinfo="percent+label"
+            )
+            fig_pie.update_layout(
+                margin=dict(t=40, b=0, l=0, r=0), height=380, showlegend=False
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with c_right:
+            fig_bar = px.bar(
+                seg_summary,
+                x="Segmento",
+                y="Ingresos",
+                color="Segmento",
+                color_discrete_map=color_map,
+                title="<b>Aporte en Facturación por Segmento ($)</b>",
+                text_auto=".2s",
+            )
+            fig_bar.update_layout(
+                margin=dict(t=40, b=0, l=0, r=0),
+                height=380,
+                showlegend=False,
+                xaxis_title="",
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.subheader("📋 Resumen Ejecutivo de Rendimiento")
+        st.dataframe(
+            seg_summary.style.format({
+                "Clientes": "{:,.0f}",
+                "Ingresos": "${:,.0f}",
+                "ComprasPromedio": "{:,.1f}",
+                "RecenciaPromedio": "{:,.0f} días",
+            }),
+            use_container_width=True,
+        )
+
+    with tab_matrix:
+        st.markdown(
+            "#### Matriz de Comportamiento: Recencia vs. Frecuencia/Monetario"
+        )
+        st.caption(
+            "Cada punto representa un cliente. Permite identificar clústeres desaprovechados y clientes en fuga."
+        )
+
+        fig_scatter = px.scatter(
+            df,
+            x="Recencia_Dias",
+            y="ValorTotal",
+            size="Compras",
+            color="Segmento",
+            color_discrete_map=color_map,
+            hover_name="Nombre",
+            hover_data=["Ciudad", "Tipo", "Categoria", "Canal", "RFM_Cell"],
+            log_y=True,
+            title="Distribución Scatter: Días sin compra vs. Valor Total Facturado (Escala Log)",
+        )
+        fig_scatter.update_layout(height=480, margin=dict(t=40, b=0, l=0, r=0))
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    with tab_exports:
+        st.subheader("📥 Exportación Segmentada para Plataformas de Pauta y CRM")
+        st.markdown(
+            "Descarga el archivo Excel individual listo para subir a listas de **Mailchimp/Klaviyo, audiencias personalizadas de Meta Ads o secuencias de WhatsApp Business**."
+        )
+
+        cols_download = st.columns(3)
+        segmentos_disponibles = list(PLAYBOOKS.keys())
+
+        for idx, seg_name in enumerate(segmentos_disponibles):
+            df_seg = df[df["Segmento"] == seg_name]
+            col_idx = idx % 3
+            with cols_download[col_idx]:
+                st.markdown(f"**{seg_name}** (`{len(df_seg)} clientes`)")
+                excel_bytes = to_excel_download(df_seg)
+                st.download_button(
+                    label=f"⬇️ Descargar {seg_name}.xlsx",
+                    data=excel_bytes,
+                    file_name=f"ANDINA_RFM_{seg_name.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"btn_{seg_name}",
+                )
+                st.markdown("<br>", unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown("##### Exportar Base Completa con Scores RFM")
+        excel_all = to_excel_download(df)
+        st.download_button(
+            label="⬇️ Descargar Base Completa con Scores y Segmentación (.xlsx)",
+            data=excel_all,
+            file_name="ANDINA_RFM_Base_Total.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="btn_all",
+        )
+
+    with tab_playbooks:
+        st.subheader("🚀 Estrategias de Activación Digital por Segmento")
+        for seg_name, pbook in PLAYBOOKS.items():
+            cant = len(df[df["Segmento"] == seg_name])
+            fact = df[df["Segmento"] == seg_name]["ValorTotal"].sum()
+
+            st.markdown(
+                f"""
+            <div class="playbook-card" style="border-left-color: {pbook['color']};">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h4 style="margin:0; color:{pbook['color']};">{seg_name} ({cant} Clientes - ${fact:,.0f})</h4>
+                </div>
+                <p style="margin: 6px 0; color: #475569; font-size: 0.9rem;">{pbook['desc']}</p>
+                <div style="margin-top: 8px;">
+                    <strong>Canales Recomendados:</strong><br>
+                    {''.join([f'<span class="channel-badge">{c}</span>' for c in pbook['canales']])}
+                </div>
+                <div style="margin-top: 10px; font-size: 0.88rem; color: #1E293B;">
+                    <strong>🎯 Acción Táctica de Marketing:</strong> {pbook['accion']}
+                </div>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
+
+else:
+    st.info("👋 Sube un archivo CSV en el panel lateral para iniciar el análisis.")
